@@ -11,6 +11,7 @@ Powered by the new ChatGPT API from OpenAI, this app has been developed using Ty
 - 📄 View and customize the System Prompt - the **secret prompt** the system shows the AI before your messages.
 - 🌡 Adjust the **creativity and randomness** of responses by setting the Temperature setting. Higher temperature means more creativity.
 - 💬 Give ChatGPT AI a **realistic human voice** by connecting your ElevenLabs text-to-speech account.
+- 🎤 **Speech recognition** powered by OpenAI Whisper
 - ✉ **Share** your favorite chat sessions online using public share URLs.
 - 📋 Easily **copy-and-paste** ChatGPT messages.
 - ✏️ Edit your messages
@@ -43,6 +44,12 @@ yarn start
 ```
 
 Then navigate to http://localhost:3000 to view the app.
+
+## Updating
+
+```
+docker pull ghcr.io/cogentapps/chat-with-gpt:release
+```
 
 ## License
 

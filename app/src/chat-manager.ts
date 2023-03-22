@@ -8,7 +8,6 @@ import { createStreamingChatCompletion } from './openai';
 import { createTitle } from './titles';
 import { ellipsize, sleep } from './utils';
 import * as idb from './idb';
-import { selectMessagesToSendSafely } from './tokenizer';
 
 export const channel = new BroadcastChannel('chats');
 
@@ -28,13 +27,20 @@ export class ChatManager extends EventEmitter {
         });
 
         channel.onmessage = (message: {
-            type: 'chat-update',
+            type: 'chat-update' | 'chat-delete',
             data: string,
         }) => {
-            const chat = deserializeChat(message.data);
-            const id = chat.id;
-            this.chats.set(id, chat);
-            this.emit(id);
+            switch (message.type) {
+                case 'chat-update':
+                    const chat = deserializeChat(message.data);
+                    const id = chat.id;
+                    this.chats.set(id, chat);
+                    this.emit(id);
+                    break;
+                case 'chat-delete':
+                    this.deleteChat(message.data, false);
+                    break;
+            }
         };
 
         (async () => {
@@ -69,7 +75,7 @@ export class ChatManager extends EventEmitter {
     public async sendMessage(message: UserSubmittedMessage) {
         const chat = this.chats.get(message.chatID);
 
-        if (!chat) {
+        if (!chat || chat.deleted) {
             throw new Error('Chat not found');
         }
 
@@ -101,7 +107,7 @@ export class ChatManager extends EventEmitter {
     public async regenerate(message: Message, requestedParameters: Parameters) {
         const chat = this.chats.get(message.chatID);
 
-        if (!chat) {
+        if (!chat || chat.deleted) {
             throw new Error('Chat not found');
         }
 
@@ -116,7 +122,7 @@ export class ChatManager extends EventEmitter {
         const latestMessage = messages[messages.length - 1];
         const chat = this.chats.get(latestMessage.chatID);
 
-        if (!chat) {
+        if (!chat || chat.deleted) {
             throw new Error('Chat not found');
         }
 
@@ -138,19 +144,19 @@ export class ChatManager extends EventEmitter {
         this.emit(chat.id);
         channel.postMessage({ type: 'chat-update', data: serializeChat(chat) });
 
-        const messagesToSend = selectMessagesToSendSafely(messages.map(getOpenAIMessageFromMessage));
+        const messagesToSend = messages.map(getOpenAIMessageFromMessage)
 
         const { emitter, cancel } = await createStreamingChatCompletion(messagesToSend, requestedParameters);
 
         let lastChunkReceivedAt = Date.now();
 
-        const onError = () => {
+        const onError = (error?: string) => {
             if (reply.done) {
                 return;
             }
             clearInterval(timer);
             cancel();
-            reply.content += "\n\nI'm sorry, I'm having trouble connecting to OpenAI. Please make sure you've entered your OpenAI API key correctly and try again.";
+            reply.content += `\n\nI'm sorry, I'm having trouble connecting to OpenAI (${error || 'no response from the API'}). Please make sure you've entered your OpenAI API key correctly and try again.`;
             reply.content = reply.content.trim();
             reply.done = true;
             this.activeReplies.delete(reply.id);
@@ -163,21 +169,20 @@ export class ChatManager extends EventEmitter {
 
         let timer = setInterval(() => {
             const sinceLastChunk = Date.now() - lastChunkReceivedAt;
-            if (sinceLastChunk > 10000 && !reply.done) {
-                onError();
+            if (sinceLastChunk > 30000 && !reply.done) {
+                onError('no response from OpenAI in the last 30 seconds');
             }
         }, 2000);
 
-        emitter.on('error', () => {
+        emitter.on('error', (e: any) => {
             if (!reply.content && !reply.done) {
                 lastChunkReceivedAt = Date.now();
-                onError();
+                onError(e);
             }
         });
 
         emitter.on('data', (data: string) => {
             if (reply.done) {
-                cancel();
                 return;
             }
             lastChunkReceivedAt = Date.now();
@@ -250,12 +255,19 @@ export class ChatManager extends EventEmitter {
         const serialized = await idb.get('chats');
         if (serialized) {
             for (const chat of serialized) {
-                const messages = new MessageTree();
-                for (const m of chat.messages) {
-                    messages.addMessage(m);
+                try {
+                    if (chat.deleted) {
+                        continue;
+                    }
+                    const messages = new MessageTree();
+                    for (const m of chat.messages) {
+                        messages.addMessage(m);
+                    }
+                    chat.messages = messages;
+                    this.loadChat(chat);
+                } catch (e) {
+                    console.error(e);
                 }
-                chat.messages = messages;
-                this.loadChat(chat);
             }
             this.emit('update');
         }
@@ -268,6 +280,11 @@ export class ChatManager extends EventEmitter {
         }
 
         const existing = this.chats.get(chat.id);
+
+        if (existing && existing.deleted) {
+            return;
+        }
+
         if (existing && existing.title && !chat.title) {
             chat.title = existing.title;
         }
@@ -282,6 +299,15 @@ export class ChatManager extends EventEmitter {
 
     public get(id: string): Chat | undefined {
         return this.chats.get(id);
+    }
+
+    public deleteChat(id: string, broadcast = true) {
+        this.chats.delete(id);
+        this.search.delete(id);
+        this.emit(id);
+        if (broadcast) {
+            channel.postMessage({ type: 'chat-delete', data: id });
+        }
     }
 }
 
@@ -307,6 +333,10 @@ export class Search {
         } else {
             this.index.replace(doc);
         }
+    }
+
+    public delete(id: string) {
+        this.index.remove({ id });
     }
 
     public query(query: string) {
