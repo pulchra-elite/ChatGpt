@@ -2,6 +2,9 @@ const cracoWasm = require("craco-wasm");
 const webpack = require("webpack");
 
 module.exports = {
+  devServer: {
+    port: 5000,
+  },
   plugins: [
     cracoWasm(),
   ],
